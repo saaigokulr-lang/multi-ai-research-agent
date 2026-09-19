@@ -8,16 +8,11 @@ from app.tools.tavily_search import SearchToolError, search_web
 
 
 @pytest.fixture(autouse=True)
-def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/test")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost")
-    from app.core.config import get_settings
-
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
+def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web retries with real backoff delays in production code
+    (1s, 2s, ...) -- neutralize the sleep so tests that trigger retries
+    don't actually wait."""
+    monkeypatch.setattr("app.core.retry.asyncio.sleep", AsyncMock())
 
 
 def _mock_tavily_client(search_return: dict | None = None, side_effect: Exception | None = None) -> MagicMock:
@@ -65,6 +60,23 @@ async def test_sdk_exception_is_wrapped_as_search_tool_error() -> None:
     with patch("app.tools.tavily_search.AsyncTavilyClient", return_value=mock_client):
         with pytest.raises(SearchToolError):
             await search_web("failing query")
+
+    # Tavily's exceptions have no common base, so search_web retries on the
+    # general Exception -- all 3 attempts should have run before giving up.
+    assert mock_client.search.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_search_web_retries_and_succeeds_on_third_attempt() -> None:
+    raw_response = {"results": [{"title": "Result", "url": "https://a.example.com", "content": "Content"}]}
+    mock_client = MagicMock()
+    mock_client.search = AsyncMock(side_effect=[RuntimeError("boom"), RuntimeError("boom"), raw_response])
+
+    with patch("app.tools.tavily_search.AsyncTavilyClient", return_value=mock_client):
+        results = await search_web("test query")
+
+    assert results == [{"title": "Result", "url": "https://a.example.com", "content": "Content"}]
+    assert mock_client.search.call_count == 3
 
 
 @pytest.mark.asyncio

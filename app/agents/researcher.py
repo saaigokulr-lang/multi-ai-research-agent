@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 from pydantic import BaseModel
 
 from app.core.logging import get_logger
-from app.schemas.research import Finding, ResearchState
+from app.schemas.research import MAX_TOKEN_BUDGET, Finding, ResearchState
 from app.services.llm_client import LLMCallError, LLMClient
+from app.services.trace_recorder import compute_latency_ms, record_node_trace
 from app.tools.tavily_search import SearchToolError, search_web
 
 logger = get_logger(__name__)
@@ -115,14 +116,67 @@ async def research_sub_question(sub_question: str, llm_client: LLMClient) -> lis
 
 
 async def researcher_node(state: ResearchState) -> ResearchState:
-    """Sequentially research every sub-question, accumulating findings."""
+    """Sequentially research every sub-question, accumulating findings.
+
+    Stops early (rather than raising) if the token budget is exhausted
+    partway through, so a long-running research pass can't blow past
+    MAX_TOKEN_BUDGET just because it started before the cutoff was hit.
+    """
     llm_client = LLMClient()
-    for sub_question in state.sub_questions:
-        findings = await research_sub_question(sub_question, llm_client)
-        state.findings.extend(findings)
-    logger.info(
-        "researcher_node collected %d findings across %d sub-questions",
-        len(state.findings),
-        len(state.sub_questions),
+    started_at = datetime.now(timezone.utc)
+    tokens_before_node = state.total_tokens_used
+    processed = 0
+    try:
+        for sub_question in state.sub_questions:
+            if state.total_tokens_used >= MAX_TOKEN_BUDGET:
+                state.budget_exceeded = True
+                logger.warning(
+                    "researcher_node stopping early after %d/%d sub-questions: "
+                    "token budget exceeded (%d >= %d)",
+                    processed,
+                    len(state.sub_questions),
+                    state.total_tokens_used,
+                    MAX_TOKEN_BUDGET,
+                )
+                break
+
+            findings = await research_sub_question(sub_question, llm_client)
+            state.findings.extend(findings)
+            processed += 1
+            state.total_tokens_used = (
+                tokens_before_node + llm_client.total_input_tokens + llm_client.total_output_tokens
+            )
+
+        logger.info(
+            "researcher_node collected %d findings across %d/%d sub-questions",
+            len(state.findings),
+            processed,
+            len(state.sub_questions),
+        )
+    except Exception as exc:
+        completed_at = datetime.now(timezone.utc)
+        await record_node_trace(
+            state.run_id,
+            "researcher",
+            llm_client.total_input_tokens,
+            llm_client.total_output_tokens,
+            compute_latency_ms(started_at, completed_at),
+            "failure",
+            started_at,
+            completed_at,
+            error=str(exc),
+        )
+        raise
+
+    completed_at = datetime.now(timezone.utc)
+    await record_node_trace(
+        state.run_id,
+        "researcher",
+        llm_client.total_input_tokens,
+        llm_client.total_output_tokens,
+        compute_latency_ms(started_at, completed_at),
+        "success",
+        started_at,
+        completed_at,
     )
     return state

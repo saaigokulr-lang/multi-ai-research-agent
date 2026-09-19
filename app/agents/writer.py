@@ -1,8 +1,11 @@
 """Writer agent: turns collected findings into a Markdown research report."""
 
+from datetime import datetime, timezone
+
 from app.core.logging import get_logger
-from app.schemas.research import ResearchState
+from app.schemas.research import MAX_TOKEN_BUDGET, ResearchState
 from app.services.llm_client import LLMCallError, LLMClient
+from app.services.trace_recorder import compute_latency_ms, record_node_trace
 
 logger = get_logger(__name__)
 
@@ -21,7 +24,11 @@ yourself from the findings, since the same source may appear against \
 multiple findings. If you are told that the research was flagged \
 incomplete, include a brief, honest note near the introduction or \
 conclusion mentioning that some areas may be under-researched due to \
-time/iteration limits - do not hide this from the reader."""
+time/iteration limits - do not hide this from the reader. If you are told \
+that the token budget was exceeded, include a similarly brief, honest note \
+that the report is a best-effort summary of whatever research completed \
+before the budget cutoff, rather than a fully exhaustive one - do not hide \
+this from the reader either."""
 
 
 def _build_report_prompt(state: ResearchState) -> str:
@@ -40,7 +47,8 @@ def _build_report_prompt(state: ResearchState) -> str:
         f"Sub-questions:\n{sub_questions_summary}\n\n"
         f"Findings:\n{findings_summary}\n\n"
         f"Unique sources (use exactly this list for the Sources section):\n{sources_summary}\n\n"
-        f"Research flagged incomplete: {state.research_incomplete}"
+        f"Research flagged incomplete: {state.research_incomplete}\n"
+        f"Token budget exceeded: {state.budget_exceeded}"
     )
 
 
@@ -62,13 +70,59 @@ async def generate_report(state: ResearchState, llm_client: LLMClient) -> str:
 
 
 async def writer_node(state: ResearchState) -> ResearchState:
-    """Populate ``state.final_report`` with a freshly generated report."""
+    """Populate ``state.final_report`` with a freshly generated report.
+
+    If the token budget was already exhausted by the time this node starts,
+    still attempts a best-effort report from whatever findings exist,
+    rather than failing outright -- the budget cutoff gets mentioned
+    honestly in the report itself, the same way research_incomplete is.
+    """
+    if state.total_tokens_used >= MAX_TOKEN_BUDGET:
+        state.budget_exceeded = True
+        logger.warning(
+            "writer_node starting with token budget already exceeded (%d >= %d); "
+            "writing a best-effort report",
+            state.total_tokens_used,
+            MAX_TOKEN_BUDGET,
+        )
+
     llm_client = LLMClient()
-    report = await generate_report(state, llm_client)
+    started_at = datetime.now(timezone.utc)
+    try:
+        report = await generate_report(state, llm_client)
+    except Exception as exc:
+        completed_at = datetime.now(timezone.utc)
+        await record_node_trace(
+            state.run_id,
+            "writer",
+            llm_client.total_input_tokens,
+            llm_client.total_output_tokens,
+            compute_latency_ms(started_at, completed_at),
+            "failure",
+            started_at,
+            completed_at,
+            error=str(exc),
+        )
+        raise
+
     state.final_report = report
+    state.total_tokens_used += llm_client.total_input_tokens + llm_client.total_output_tokens
     logger.info(
-        "writer_node generated report of %d characters (research_incomplete=%s)",
+        "writer_node generated report of %d characters (research_incomplete=%s, budget_exceeded=%s)",
         len(report),
         state.research_incomplete,
+        state.budget_exceeded,
+    )
+
+    completed_at = datetime.now(timezone.utc)
+    await record_node_trace(
+        state.run_id,
+        "writer",
+        llm_client.total_input_tokens,
+        llm_client.total_output_tokens,
+        compute_latency_ms(started_at, completed_at),
+        "success",
+        started_at,
+        completed_at,
     )
     return state

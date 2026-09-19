@@ -21,19 +21,6 @@ _SUB_QUESTIONS = ["What is the current state?", "What are the risks?"]
 _SEARCH_RESULTS = [{"title": "Result", "url": "https://a.example.com", "content": "Some content."}]
 
 
-@pytest.fixture(autouse=True)
-def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/test")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost")
-    from app.core.config import get_settings
-
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
 def _make_fake_generate_structured(supervisor_decisions: list[SupervisorDecision]):
     """Route generate_structured to a canned response based on response_model."""
     decisions_iter = iter(supervisor_decisions)

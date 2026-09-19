@@ -22,15 +22,19 @@ class Finding(BaseModel):
 
 
 MAX_RESEARCH_ITERATIONS: int = 2
+MAX_TOKEN_BUDGET: int = 50000
 
 
 class ResearchState(BaseModel):
     """State threaded through the research graph."""
 
     question: str
+    run_id: str | None = None
     sub_questions: list[str] = []
     findings: list[Finding] = []
     research_complete: bool = False
     research_iterations: int = 0
     research_incomplete: bool = False
     final_report: str = ""
+    total_tokens_used: int = 0
+    budget_exceeded: bool = False

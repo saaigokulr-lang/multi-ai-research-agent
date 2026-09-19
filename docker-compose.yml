@@ -1,0 +1,19 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    # DATABASE_URL/REDIS_URL/OPENROUTER_API_KEY/TAVILY_API_KEY/GROQ_API_KEY are
+    # read from the local .env at container start -- not baked into the image.
+    # No postgres/redis services here: both are hosted externally (Supabase /
+    # Upstash) and the app connects out to them exactly as it does outside Docker.
+    env_file:
+      - .env
+    healthcheck:
+      # Uses the stdlib rather than curl/wget, neither of which is installed
+      # in the slim base image.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

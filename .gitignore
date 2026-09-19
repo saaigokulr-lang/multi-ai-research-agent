@@ -19,6 +19,9 @@ dist/
 htmlcov/
 .coverage
 
+# Local runtime logs
+*.log
+
 # IDE
 .vscode/
 .idea/

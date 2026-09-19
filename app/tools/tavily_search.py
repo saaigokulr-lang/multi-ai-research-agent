@@ -10,8 +10,14 @@ from tavily import AsyncTavilyClient
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.retry import with_retry
 
 logger = get_logger(__name__)
+
+# Bounds how long a single search call can hang. AsyncTavilyClient's
+# constructor doesn't expose a timeout kwarg directly, but .search() does
+# (defaulting to 60s) -- passed explicitly on each call below.
+_TAVILY_TIMEOUT_SECONDS = 15.0
 
 
 class SearchToolError(Exception):
@@ -35,8 +41,17 @@ async def search_web(query: str, max_results: int = 5) -> list[dict]:
     settings = get_settings()
     client = AsyncTavilyClient(api_key=settings.TAVILY_API_KEY)
 
+    # Tavily's SDK exceptions share no common base (see SearchToolError's
+    # docstring), so there's no finer-grained "network/timeout only" type to
+    # retry on -- retrying the general exception here is a deliberate,
+    # known trade-off: it also retries errors that will never succeed (e.g.
+    # a bad API key), not just transient ones.
+    @with_retry(max_attempts=3, base_delay=1.0, retryable_exceptions=(Exception,))
+    async def _call_search() -> dict:
+        return await client.search(query=query, max_results=max_results, timeout=_TAVILY_TIMEOUT_SECONDS)
+
     try:
-        response = await client.search(query=query, max_results=max_results)
+        response = await _call_search()
     except Exception as exc:
         logger.error("Tavily search failed for query=%r: %s", query, exc)
         raise SearchToolError(f"Tavily search failed for query={query!r}: {exc}") from exc

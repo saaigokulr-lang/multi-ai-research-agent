@@ -21,19 +21,6 @@ def _make_parsed_completion(parsed: ResearchPlan | None) -> SimpleNamespace:
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))])
 
 
-@pytest.fixture(autouse=True)
-def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/test")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost")
-    from app.core.config import get_settings
-
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
 @pytest.mark.asyncio
 async def test_generate_research_plan_returns_valid_plan() -> None:
     client = LLMClient()
@@ -70,6 +57,26 @@ async def test_planner_node_updates_sub_questions_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_planner_node_accumulates_tokens_into_state() -> None:
+    client = LLMClient()
+    expected = ResearchPlan(sub_questions=_SUB_QUESTIONS)
+    completion = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(parsed=expected))],
+        usage=SimpleNamespace(prompt_tokens=120, completion_tokens=45),
+    )
+    state = ResearchState(question="How is AI changing healthcare?")
+
+    with patch("app.agents.planner.LLMClient", return_value=client), patch.object(
+        client._client.chat.completions,
+        "parse",
+        new=AsyncMock(return_value=completion),
+    ):
+        result = await planner_node(state)
+
+    assert result.total_tokens_used == 120 + 45
+
+
+@pytest.mark.asyncio
 async def test_generate_research_plan_raises_clear_error_on_unparseable_response() -> None:
     client = LLMClient()
     with patch.object(
@@ -79,3 +86,21 @@ async def test_generate_research_plan_raises_clear_error_on_unparseable_response
     ):
         with pytest.raises(LLMCallError):
             await generate_research_plan("How is AI changing healthcare?", client)
+
+
+@pytest.mark.asyncio
+async def test_planner_node_reraises_and_records_failure_trace_on_error() -> None:
+    """planner_node's except branch: a failed plan generation must still
+    propagate (rather than being swallowed) after recording a trace. Uses
+    the default run_id=None so record_node_trace's own DB write is a no-op,
+    isolating this test to planner_node's error-handling behavior."""
+    client = LLMClient()
+    state = ResearchState(question="How is AI changing healthcare?")
+
+    with patch("app.agents.planner.LLMClient", return_value=client), patch.object(
+        client._client.chat.completions,
+        "parse",
+        new=AsyncMock(return_value=_make_parsed_completion(None)),
+    ):
+        with pytest.raises(LLMCallError):
+            await planner_node(state)

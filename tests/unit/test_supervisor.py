@@ -10,19 +10,6 @@ from app.schemas.research import Finding, ResearchState
 from app.services.llm_client import LLMCallError, LLMClient
 
 
-@pytest.fixture(autouse=True)
-def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/test")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost")
-    from app.core.config import get_settings
-
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
 def _make_parsed_completion(parsed: SupervisorDecision | None) -> SimpleNamespace:
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))])
 
@@ -112,3 +99,20 @@ async def test_supervisor_node_does_not_flag_incomplete_when_llm_completes_on_it
     assert result.research_iterations == 2
     assert result.research_complete is True
     assert result.research_incomplete is False
+
+
+@pytest.mark.asyncio
+async def test_supervisor_node_reraises_and_records_failure_trace_on_error() -> None:
+    """supervisor_node's own except branch only sees exceptions
+    evaluate_research doesn't already fail open on (it only catches
+    LLMCallError) -- an unexpected error must still propagate after
+    recording a trace. Uses the default run_id=None so record_node_trace's
+    own DB write is a no-op."""
+    client = LLMClient()
+    state = _make_state()
+
+    with patch("app.agents.supervisor.LLMClient", return_value=client), patch(
+        "app.agents.supervisor.evaluate_research", new=AsyncMock(side_effect=RuntimeError("boom"))
+    ):
+        with pytest.raises(RuntimeError):
+            await supervisor_node(state)

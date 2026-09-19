@@ -1,8 +1,11 @@
 """Planner agent: breaks a research question into focused sub-questions."""
 
+from datetime import datetime, timezone
+
 from app.core.logging import get_logger
 from app.schemas.research import ResearchPlan, ResearchState
 from app.services.llm_client import LLMCallError, LLMClient
+from app.services.trace_recorder import compute_latency_ms, record_node_trace
 
 logger = get_logger(__name__)
 
@@ -36,7 +39,37 @@ async def generate_research_plan(question: str, llm_client: LLMClient) -> Resear
 async def planner_node(state: ResearchState) -> ResearchState:
     """Populate ``state.sub_questions`` from a freshly generated research plan."""
     llm_client = LLMClient()
-    plan = await generate_research_plan(state.question, llm_client)
+    started_at = datetime.now(timezone.utc)
+    try:
+        plan = await generate_research_plan(state.question, llm_client)
+    except Exception as exc:
+        completed_at = datetime.now(timezone.utc)
+        await record_node_trace(
+            state.run_id,
+            "planner",
+            llm_client.total_input_tokens,
+            llm_client.total_output_tokens,
+            compute_latency_ms(started_at, completed_at),
+            "failure",
+            started_at,
+            completed_at,
+            error=str(exc),
+        )
+        raise
+
     state.sub_questions = plan.sub_questions
+    state.total_tokens_used += llm_client.total_input_tokens + llm_client.total_output_tokens
     logger.info("planner_node generated %d sub-questions", len(state.sub_questions))
+
+    completed_at = datetime.now(timezone.utc)
+    await record_node_trace(
+        state.run_id,
+        "planner",
+        llm_client.total_input_tokens,
+        llm_client.total_output_tokens,
+        compute_latency_ms(started_at, completed_at),
+        "success",
+        started_at,
+        completed_at,
+    )
     return state

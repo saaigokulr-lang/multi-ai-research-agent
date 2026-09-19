@@ -1,0 +1,35 @@
+# Secrets -- real values are supplied at container start via docker-compose's
+# env_file, never baked into the image.
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Test / tooling caches and reports
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coveragerc
+htmlcov/
+tests/
+
+# VCS
+.git/
+.gitignore
+
+# IDE / editor
+.vscode/
+.idea/
+.claude/
+
+# Misc local artifacts
+server.log

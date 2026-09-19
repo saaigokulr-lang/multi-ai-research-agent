@@ -12,19 +12,6 @@ from app.services.llm_client import LLMCallError, LLMClient
 _SAMPLE_REPORT = "## Introduction\n\nSome intro.\n\n## Sources\n\n- https://a.example.com"
 
 
-@pytest.fixture(autouse=True)
-def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/test")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost")
-    from app.core.config import get_settings
-
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
 def _make_completion(content: str) -> SimpleNamespace:
     return SimpleNamespace(
         model="openai/gpt-4o-mini",
@@ -156,3 +143,18 @@ async def test_generate_report_propagates_llm_call_error() -> None:
     ):
         with pytest.raises(LLMCallError):
             await generate_report(_make_state(), client)
+
+
+@pytest.mark.asyncio
+async def test_writer_node_reraises_and_records_failure_trace_on_error() -> None:
+    """writer_node's except branch: a failed report generation must still
+    propagate (rather than being swallowed) after recording a trace. Uses
+    the default run_id=None so record_node_trace's own DB write is a no-op."""
+    client = LLMClient()
+    state = _make_state()
+
+    with patch("app.agents.writer.LLMClient", return_value=client), patch(
+        "app.agents.writer.generate_report", new=AsyncMock(side_effect=LLMCallError("boom"))
+    ):
+        with pytest.raises(LLMCallError):
+            await writer_node(state)

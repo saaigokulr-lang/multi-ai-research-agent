@@ -1,10 +1,13 @@
 """Supervisor agent: judges whether collected research is sufficient to write on."""
 
+from datetime import datetime, timezone
+
 from pydantic import BaseModel
 
 from app.core.logging import get_logger
 from app.schemas.research import MAX_RESEARCH_ITERATIONS, ResearchState
 from app.services.llm_client import LLMCallError, LLMClient
+from app.services.trace_recorder import compute_latency_ms, record_node_trace
 
 logger = get_logger(__name__)
 
@@ -60,23 +63,53 @@ async def evaluate_research(state: ResearchState, llm_client: LLMClient) -> Supe
 async def supervisor_node(state: ResearchState) -> ResearchState:
     """Evaluate research sufficiency and apply the iteration-limit safety cap."""
     llm_client = LLMClient()
-    decision = await evaluate_research(state, llm_client)
+    started_at = datetime.now(timezone.utc)
+    try:
+        decision = await evaluate_research(state, llm_client)
 
-    state.research_complete = decision.research_complete
-    state.research_iterations += 1
+        state.research_complete = decision.research_complete
+        state.research_iterations += 1
 
-    limit_forced = False
-    if state.research_iterations >= MAX_RESEARCH_ITERATIONS and not decision.research_complete:
-        state.research_complete = True
-        state.research_incomplete = True
-        limit_forced = True
+        limit_forced = False
+        if state.research_iterations >= MAX_RESEARCH_ITERATIONS and not decision.research_complete:
+            state.research_complete = True
+            state.research_incomplete = True
+            limit_forced = True
 
-    logger.info(
-        "supervisor_node decision=%s iteration=%d/%d limit_forced=%s reasoning=%r",
-        decision.research_complete,
-        state.research_iterations,
-        MAX_RESEARCH_ITERATIONS,
-        limit_forced,
-        decision.reasoning,
+        state.total_tokens_used += llm_client.total_input_tokens + llm_client.total_output_tokens
+
+        logger.info(
+            "supervisor_node decision=%s iteration=%d/%d limit_forced=%s reasoning=%r",
+            decision.research_complete,
+            state.research_iterations,
+            MAX_RESEARCH_ITERATIONS,
+            limit_forced,
+            decision.reasoning,
+        )
+    except Exception as exc:
+        completed_at = datetime.now(timezone.utc)
+        await record_node_trace(
+            state.run_id,
+            "supervisor",
+            llm_client.total_input_tokens,
+            llm_client.total_output_tokens,
+            compute_latency_ms(started_at, completed_at),
+            "failure",
+            started_at,
+            completed_at,
+            error=str(exc),
+        )
+        raise
+
+    completed_at = datetime.now(timezone.utc)
+    await record_node_trace(
+        state.run_id,
+        "supervisor",
+        llm_client.total_input_tokens,
+        llm_client.total_output_tokens,
+        compute_latency_ms(started_at, completed_at),
+        "success",
+        started_at,
+        completed_at,
     )
     return state

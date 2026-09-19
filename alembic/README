@@ -1,0 +1,21 @@
+Generic single-database configuration with an async dbapi.
+
+## Running migrations
+
+The connection string comes from DATABASE_URL in .env (via
+app.core.config.get_settings()) -- alembic/env.py reads it and rewrites a
+plain postgresql:// URL to postgresql+asyncpg://, the same as the app does.
+There is nothing to configure in alembic.ini itself.
+
+Apply all pending migrations (creates research_runs, findings, reports on a
+fresh database):
+
+    alembic upgrade head
+
+Create a new migration after changing app/database/models.py:
+
+    alembic revision --autogenerate -m "describe the change"
+
+Roll back the most recent migration:
+
+    alembic downgrade -1

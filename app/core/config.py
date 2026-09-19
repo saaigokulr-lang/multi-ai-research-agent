@@ -7,6 +7,7 @@ runtime error deep inside an API call.
 """
 
 from functools import lru_cache
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     REDIS_URL: str
     DEFAULT_MODEL: str = Field(default="openai/gpt-4o-mini")
     LOG_LEVEL: str = Field(default="INFO")
+    GROQ_API_KEY: Optional[str] = Field(default=None)
 
 
 @lru_cache
