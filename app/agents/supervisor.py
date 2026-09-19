@@ -27,16 +27,44 @@ class SupervisorDecision(BaseModel):
     reasoning: str
 
 
+# The Supervisor only judges sufficiency, not citation accuracy, so its
+# prompt doesn't need source_url/full snippets -- just enough of each claim
+# to gauge substance. This keeps the prompt from growing unboundedly with
+# findings the way it did when full detail was included (writer.py's prompt
+# still gets full finding detail, since it does need it for citations).
+_CLAIM_TRUNCATE_LENGTH = 100
+
+# Rough token estimate for logging only -- no tokenizer dependency, just the
+# common ~4-chars-per-token heuristic, good enough to flag a growing prompt
+# in logs before it trips a provider's real token-per-minute limit.
+_CHARS_PER_TOKEN_ESTIMATE = 4
+
+
+def _truncate_claim(claim: str, max_length: int = _CLAIM_TRUNCATE_LENGTH) -> str:
+    if len(claim) <= max_length:
+        return claim
+    return claim[:max_length].rstrip() + "..."
+
+
 def _build_evaluation_prompt(state: ResearchState) -> str:
-    findings_summary = (
-        "\n".join(f"- [{finding.sub_question}] {finding.claim}" for finding in state.findings)
-        or "(no findings collected yet)"
-    )
+    claims_by_sub_question: dict[str, list[str]] = {}
+    for finding in state.findings:
+        claims_by_sub_question.setdefault(finding.sub_question, []).append(finding.claim)
+
+    if claims_by_sub_question:
+        findings_summary = "\n".join(
+            f"- {sub_question} ({len(claims)} finding{'s' if len(claims) != 1 else ''}):\n"
+            + "\n".join(f"  - {_truncate_claim(claim)}" for claim in claims)
+            for sub_question, claims in claims_by_sub_question.items()
+        )
+    else:
+        findings_summary = "(no findings collected yet)"
+
     sub_questions_summary = "\n".join(f"- {sub_question}" for sub_question in state.sub_questions)
     return (
         f"Research question: {state.question}\n\n"
         f"Sub-questions:\n{sub_questions_summary}\n\n"
-        f"Findings so far:\n{findings_summary}"
+        f"Findings so far (grouped by sub-question, claims truncated):\n{findings_summary}"
     )
 
 
@@ -46,9 +74,15 @@ async def evaluate_research(state: ResearchState, llm_client: LLMClient) -> Supe
     Fails open: if the LLM call fails, defaults to ``research_complete=True``
     rather than risking an infinite research loop.
     """
+    prompt = _build_evaluation_prompt(state)
+    logger.info(
+        "Supervisor evaluation prompt built: %d chars (~%d tokens estimated)",
+        len(prompt),
+        len(prompt) // _CHARS_PER_TOKEN_ESTIMATE,
+    )
     try:
         return await llm_client.generate_structured(
-            prompt=_build_evaluation_prompt(state),
+            prompt=prompt,
             response_model=SupervisorDecision,
             system_prompt=SUPERVISOR_SYSTEM_PROMPT,
         )

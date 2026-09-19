@@ -39,6 +39,67 @@ async def test_evaluate_research_returns_valid_decision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_evaluate_research_prompt_is_compact_and_grouped_by_sub_question() -> None:
+    """The Supervisor's prompt must stay compact as findings accumulate --
+    this is the fix for a real failure where full claim/source_url/snippet
+    detail per finding grew the prompt past a provider's token-per-minute
+    limit. Full detail is still fine in writer.py's prompt, which needs it
+    for citations; the Supervisor only needs enough to judge sufficiency."""
+    client = LLMClient()
+    long_claim_1 = "A" * 150
+    long_claim_2 = "B" * 150
+    state = _make_state(
+        sub_questions=["What is the current state?", "What are the risks?"],
+        findings=[
+            Finding(
+                claim=long_claim_1,
+                source_url="https://example.com/unique-source-one",
+                snippet="Full detailed snippet text that should never reach the supervisor prompt.",
+                sub_question="What is the current state?",
+            ),
+            Finding(
+                claim="A second, shorter supporting claim.",
+                source_url="https://example.com/unique-source-two",
+                snippet="Another full snippet.",
+                sub_question="What is the current state?",
+            ),
+            Finding(
+                claim=long_claim_2,
+                source_url="https://example.com/unique-source-three",
+                snippet="Yet another snippet.",
+                sub_question="What are the risks?",
+            ),
+        ],
+    )
+    expected = SupervisorDecision(research_complete=True, reasoning="Sufficient.")
+    mock_parse = AsyncMock(return_value=_make_parsed_completion(expected))
+
+    with patch.object(client._client.chat.completions, "parse", new=mock_parse):
+        await evaluate_research(state, client)
+
+    _, kwargs = mock_parse.call_args
+    user_message = next(m["content"] for m in kwargs["messages"] if m["role"] == "user")
+
+    # Sub-question groupings and per-sub-question finding counts are present.
+    assert "What is the current state?" in user_message
+    assert "What are the risks?" in user_message
+    assert "2 findings" in user_message
+    assert "1 finding)" in user_message
+
+    # Claims are truncated, not sent in full.
+    assert long_claim_1 not in user_message
+    assert long_claim_2 not in user_message
+    assert long_claim_1[:80] in user_message
+
+    # Source URLs and full snippets never reach the supervisor's prompt --
+    # that detail is the Writer's concern, not the Supervisor's.
+    assert "https://example.com/unique-source-one" not in user_message
+    assert "https://example.com/unique-source-two" not in user_message
+    assert "https://example.com/unique-source-three" not in user_message
+    assert "Full detailed snippet text" not in user_message
+
+
+@pytest.mark.asyncio
 async def test_evaluate_research_fails_open_on_llm_call_error() -> None:
     client = LLMClient()
     with patch.object(
