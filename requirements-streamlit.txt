@@ -1,0 +1,5 @@
+# Separate from requirements.txt on purpose -- the Streamlit frontend only
+# ever talks to the existing FastAPI app over HTTP, so it doesn't need
+# FastAPI/SQLAlchemy/LangGraph/etc. in its own (smaller) image.
+streamlit>=1.30,<2
+requests>=2.31,<3

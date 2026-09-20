@@ -56,7 +56,8 @@ pipeline's cost and behavior is inspectable after the fact via `GET /research/{i
 | **PostgreSQL (Supabase)** | Durable, relational system of record for runs, findings, reports, and execution traces — hosted so the container never needs a local database. |
 | **Redis (Upstash)** | One narrow job: an atomic, short-TTL idempotency lock (`SET NX EX`) for repeat requests — a pattern Redis's semantics fit more directly than adding locking logic to Postgres for something this ephemeral. |
 | **pytest** (+ `pytest-asyncio`, `pytest-cov`) | Async-aware test framework matching the codebase, with coverage reporting to catch untested error paths. |
-| **Docker / Docker Compose** | Reproducible packaging for the FastAPI app itself; Postgres and Redis stay external/hosted, so the compose file has exactly one service. |
+| **Streamlit** | A minimal UI over the existing API for manually trying the system without `curl`/`/docs` — it's a plain HTTP client of `/research`, with no agent logic of its own, kept in its own image with its own small dependency set. |
+| **Docker / Docker Compose** | Reproducible packaging for both services — the FastAPI app and the Streamlit frontend; Postgres and Redis stay external/hosted, so the compose file only ever needs these two. |
 
 ## Setup
 
@@ -91,16 +92,35 @@ uvicorn app.main:app --reload     # http://localhost:8000/docs
 
 ### Run with Docker Compose
 
+Two services start together: `app` (the FastAPI backend) and `frontend` (a Streamlit
+UI over it). The frontend talks to the backend over the compose network at
+`http://app:8000` — not `localhost`, which inside a container means itself.
+
 ```bash
 docker compose build
-docker compose up                 # http://localhost:8000/docs
+docker compose up
+# API + docs:  http://localhost:8000/docs
+# Frontend UI: http://localhost:8501
 
 # Migrations are a one-off command, not run automatically on container start:
 docker compose run --rm app alembic upgrade head
 ```
 
 `.env` must exist locally with real values before either of the above — it's read via
-`env_file` at container start and is excluded from the image by `.dockerignore`.
+`env_file` at container start and is excluded from the image by `.dockerignore`. It's
+only needed by the `app` service; `frontend` only needs `API_BASE_URL`, which
+docker-compose.yml already sets for the container-to-container case.
+
+`depends_on: app` on the `frontend` service only orders container *start*, not API
+*readiness* — `streamlit_app.py` retries its first request a few times with a short
+delay to absorb the window where the API container is still starting up.
+
+**If `DATABASE_URL` points at Supabase**, make sure it's the **Session Pooler**
+connection string, not the direct `db.<project>.supabase.co` one — the direct host
+resolves to IPv6, which Docker's default network can't route out over, and fails with
+`OSError: [Errno 101] Network is unreachable` from inside the `app` container (it works
+fine outside Docker, which is what makes this one confusing). See the comment next to
+`DATABASE_URL` in `.env.example`.
 
 ### Run tests
 

@@ -267,3 +267,72 @@ hard cap — from the start, not just enough detail to look complete in a small 
 Log the size, not just the content, so growth is visible before it becomes a real
 failure. (The Writer's prompt has this same latent risk and is explicitly listed as a
 known limitation in `README.md`, not yet fixed.)
+
+---
+
+## 9. Supabase's direct connection string is unreachable from inside Docker (Milestone 16)
+
+**Problem.** After adding the Streamlit frontend and finally running the full stack
+under real Docker (Docker itself wasn't available until this milestone — see problem
+#7), submitting a question through the UI returned a 500 from `POST /research` every
+time, even though the exact same `DATABASE_URL` worked fine for every non-Docker run
+throughout the whole project.
+
+**Root cause.** `DATABASE_URL` used Supabase's direct connection host
+(`db.<project>.supabase.co`), which resolves to an IPv6 address. Docker Desktop's
+default bridge network doesn't route IPv6 traffic out by default, so `asyncpg`'s
+connection attempt from inside the `app` container failed outright — while the same
+hostname resolved and connected fine from the host machine directly, which does have
+working IPv6 routing. Same connection string, different network path, only one of them
+broken.
+
+**Diagnosis.** The app container's logs showed the real traceback ending in
+`OSError: [Errno 101] Network is unreachable` inside asyncpg's connection setup — not a
+timeout, not an auth failure, a routing-level failure, which pointed straight at
+IPv6/network path rather than credentials or the database itself.
+
+**Fix.** Switched `DATABASE_URL` to Supabase's Session Pooler connection string
+(`aws-0-<region>.pooler.supabase.com`), which is IPv4-reachable. No code changes
+required — purely a connection-string change, confirmed by rebuilding and confirming
+`POST /research` succeeded through the container afterward. `.env.example` and
+`README.md` now both call this out explicitly next to `DATABASE_URL` so it isn't
+rediscovered blind.
+
+**Prevention.** When a hosted service offers both a direct and a pooled/proxied
+connection option, prefer the pooled one for anything that might run inside a
+container or a restrictive network — direct connections to modern hosting providers
+increasingly default to IPv6-only or IPv6-preferred, which is exactly the kind of thing
+that works on a developer's host machine and silently fails in a container.
+
+---
+
+## 10. Non-root container user couldn't write to its own working directory (Milestone 16)
+
+**Problem.** After fixing problem #9, the frontend container's logs showed a second,
+unrelated error on every session event: `PermissionError: [Errno 13] Permission
+denied: '/app/.streamlit'`, thrown when Streamlit tried to write its local
+usage-telemetry ID file.
+
+**Root cause.** `Dockerfile.streamlit`'s `WORKDIR /app` creates that directory while
+still running as `root` (before the `USER appuser` switch later in the file). The
+subsequent `COPY --chown=appuser:appuser streamlit_app.py .` only changes ownership of
+the file it copies, not the pre-existing `/app` directory itself — so `/app` stayed
+root-owned, and the non-root `appuser` couldn't create a new `.streamlit/` subdirectory
+inside it at runtime.
+
+**Diagnosis.** Read the container's own traceback directly — it named the exact path
+(`/app/.streamlit`) and exact syscall failure (`PermissionError: [Errno 13]`), which is
+unambiguous: a non-root user, an operation needing write access to a directory it
+doesn't own.
+
+**Fix.** Added `chown appuser:appuser /app` immediately after creating the user, in
+both `Dockerfile.streamlit` and (preemptively, since it has the same latent gap even
+though nothing had triggered it there yet) the main `Dockerfile` — before either
+`COPY` step runs, so the working directory itself is owned by the user that will later
+run as, not just the files copied into it.
+
+**Prevention.** Creating a non-root user and copying files into a `WORKDIR` with
+`--chown` is not the same as that user owning the directory itself — anything that
+later needs to create a *new* file or subdirectory there (caches, telemetry, temp
+files) needs the directory's own ownership fixed explicitly, not just the files known
+about at build time.

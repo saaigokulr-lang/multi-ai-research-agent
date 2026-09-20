@@ -10,9 +10,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# A dedicated system account to run the app as, rather than root.
+# A dedicated system account to run the app as, rather than root. WORKDIR
+# created /app as root before this ran, and `COPY --chown` below only fixes
+# ownership of the files it copies, not the pre-existing directory itself --
+# chown it explicitly so appuser can write into its own working directory
+# (e.g. any library that wants a local cache/state file there) at runtime.
 RUN groupadd --system appuser \
-    && useradd --system --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser
+    && useradd --system --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser \
+    && chown appuser:appuser /app
 
 # Installed before the rest of the app code is copied in, so this layer (the
 # slow part) is only rebuilt when requirements.txt itself changes, not on

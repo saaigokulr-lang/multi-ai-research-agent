@@ -1,0 +1,25 @@
+# Same base and non-root-user approach as the main Dockerfile, kept as a
+# separate image since this frontend's dependencies (streamlit, requests)
+# are entirely disjoint from the API's.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN groupadd --system appuser \
+    && useradd --system --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser \
+    && chown appuser:appuser /app
+
+COPY requirements-streamlit.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements-streamlit.txt
+
+COPY --chown=appuser:appuser streamlit_app.py .
+
+USER appuser
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0"]

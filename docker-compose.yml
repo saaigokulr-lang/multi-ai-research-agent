@@ -17,3 +17,20 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      # "app" here is the other service's name -- Compose's built-in DNS
+      # resolves it to that container on the shared compose network, unlike
+      # localhost, which inside this container would mean itself.
+      API_BASE_URL: http://app:8000
+    depends_on:
+      # Only orders container start, not API readiness -- streamlit_app.py
+      # retries its first request a few times to absorb the gap while
+      # uvicorn is still starting up inside the app container.
+      - app
