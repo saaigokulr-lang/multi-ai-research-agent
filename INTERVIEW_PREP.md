@@ -21,7 +21,9 @@ writes a cited Markdown report — only once that gate passes. It's built on Lan
 for orchestration, FastAPI for the API, Postgres for persistence, and Redis for
 request idempotency, with hard caps on iteration count and token usage so it can't
 loop forever or run away on cost, and per-node execution tracing so every run's
-behavior and cost is inspectable after the fact."
+behavior and cost is inspectable after the fact. It's fully containerized with Docker
+Compose, including a small Streamlit UI on top of the API for actually trying it
+without reaching for curl."
 
 ### 2-minute version
 
@@ -57,7 +59,18 @@ Groq on rate-limit errors specifically — and later, a real Docker-based end-to
 found that Groq's own token-per-minute quota could also be exceeded by a Supervisor
 prompt that grew unboundedly with accumulated findings, which I fixed by compacting
 that specific prompt (grouped, truncated, no full snippets) rather than raising the
-model's other complexity."
+model's other complexity.
+
+Getting the whole thing running in real Docker (not just code that should theoretically
+work in a container) surfaced two more real bugs at the very end: Supabase's direct
+Postgres connection string resolves to IPv6, which Docker's default network couldn't
+route out over, so the app container failed with a raw 'network unreachable' error
+even though the exact same connection string worked fine outside Docker — fixed by
+switching to Supabase's IPv4-reachable connection pooler string. And the Streamlit
+container's non-root user didn't actually own its own working directory, since
+`COPY --chown` only covers the files it copies, not a directory `WORKDIR` already
+created as root — it failed trying to write a local telemetry file at runtime, fixed
+with an explicit `chown` on the directory itself."
 
 ---
 
@@ -365,6 +378,33 @@ reproduce. Diagnosis approach: for anything built from an accumulating, unbounde
 collection, ask "what does this look like at 10x the size a normal test uses" before
 assuming a small-scale passing test means the design is safe; log the actual size of
 the constructed artifact (prompt length, token estimate), not just its content.)*
+
+**"A database connection string works perfectly from every developer's machine but
+fails with a low-level network error the moment the exact same app runs inside a
+Docker container."** *(Real answer: this happened with Supabase's direct connection
+host here — it resolves to an IPv6 address, and Docker Desktop's default network
+doesn't route IPv6 traffic out, so `asyncpg` failed with `OSError: [Errno 101] Network
+is unreachable` from inside the container while the identical connection string worked
+fine on the host. Diagnosis approach: when the exact same config works in one
+environment and fails in another with a low-level OS/network error rather than an
+auth or timeout error, suspect the network path itself, not the credentials or the
+remote service — check whether the failing environment has a different IP protocol
+story (IPv4-only container network vs. dual-stack host). Fix approach: prefer a
+hosted service's pooled/proxied connection option over its direct one when the client
+might run somewhere with restricted networking.)*
+
+**"A container running as a non-root user gets a permission error trying to write a
+file inside its own working directory — a directory the Dockerfile's `COPY --chown`
+was supposed to hand to that exact user."** *(Real answer: this happened with the
+Streamlit container here — Streamlit tried to write a local telemetry ID file and got
+`PermissionError: [Errno 13] Permission denied`. Root cause: `WORKDIR` creates that
+directory while the Dockerfile is still running as root, before the user switch, and
+`COPY --chown=user:group` only changes ownership of the files it copies *into* that
+directory — not the pre-existing directory entry itself. Diagnosis approach: read the
+exact path in the traceback and ask "was this path created before or after the user
+was switched, and by which instruction" — ownership of a file and ownership of the
+directory it lives in are two separate things. Fix approach: `chown` the directory
+itself, explicitly, right after creating the user and before switching to it.)*
 
 ---
 
